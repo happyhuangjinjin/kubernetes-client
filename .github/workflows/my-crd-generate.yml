@@ -1,67 +1,55 @@
-#
-# Copyright (C) 2015 Red Hat, Inc.
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#         http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
-#
-
-name: Generate Model
-
+name: CRD Java Model Generate
 on:
-  push:
-    branches:
-      - main
-  pull_request:
-    paths-ignore:
-      - 'doc/**'
-      - 'ide-config/**'
-      - '**.md'
+  workflow_dispatch:
+    inputs:
+      crds:
+        type: string
+        required: true
+        description: 'Comma-separated paths to CRD yaml sources, can be either HTTP url or local file path.'
+      generatingJavaPackage:
+        type: string
+        required: true
+        description: 'The package name of the generated java project.'
+      crdApiGroupPrefix:
+        type: string
+        required: false
+        description: 'The prefix of the target CRDs api group to generate. (Optional)'
 
-concurrency:
-  # Only run once for latest commit per ref and cancel other (previous) runs.
-  group: ci-go-kubernetes-client-${{ github.ref }}
-  cancel-in-progress: true
+env:
+  IMAGE_NAME: ghcr.io/kubernetes-client/java/crd-model-gen
+  IMAGE_TAG: v1.0.6
+  GEN_DIR: crd-gen
 
 permissions:
   contents: read
 
 jobs:
-  generate-model:
-    name: Kubernetes Model Generator Build
-    runs-on: macos-latest
+  generate:
+    runs-on: ubuntu-latest
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-      - name: Setup Go
-        uses: actions/setup-go@v5
-        with:
-          go-version: 'stable'
-      - name: Setup Java 17
-        uses: actions/setup-java@v4
-        with:
-          java-version: '17'
-          distribution: 'temurin'
-      - name: Generate model
-        run: make generate-model
-      - name: Check No Schema file modified
+      - name: Run CRD Model Generation
         run: |
-          git add .
-          IGNORED_PATTERNS="validation-schema.json"
-          INCLUDE_PATTERNS="kube-schema.json\|src/generated/java\|openapi/schemas/"
-          MODIFIED_FILES_COUNT=$(git status | grep -v "$IGNORED_PATTERNS" | grep "$INCLUDE_PATTERNS" | wc -l)
-          if [ $MODIFIED_FILES_COUNT -eq "0" ]; then
-            echo "No Schema files modified. Build Success.";
-          else
-            git status | grep -v "$IGNORED_PATTERNS" | grep "$INCLUDE_PATTERNS"
-            echo "Schema files modified. Build Failure";
-            exit 1;
-          fi;
+          read CRD_SRC_ARGS < <(echo '${{ github.event.inputs.crds }}' | perl -ne 'print join " ", map {"-u $_"} split /,/')
+          test -z ${{ github.event.inputs.crdApiGroupPrefix }} || export CRD_API_GROUP_ARGS="-n ${{ github.event.inputs.crdApiGroupPrefix }}"
+          echo "CRD Src Args: ${CRD_SRC_ARGS}"
+          echo "CRD Api Group Prefix Args: ${CRD_API_GROUP_ARGS}"
+          mkdir -p ${GEN_DIR}
+          docker run \
+            --rm \
+            -v /var/run/docker.sock:/var/run/docker.sock \
+            -v "$(pwd)":"$(pwd)" \
+            --network host \
+            ${IMAGE_NAME}:${IMAGE_TAG} \
+            /generate.sh \
+            ${CRD_SRC_ARGS} \
+            ${CRD_API_GROUP_ARGS} \
+            -p ${{ github.event.inputs.generatingJavaPackage }} \
+            -o "$(pwd)/${GEN_DIR}"
+          ls -lh ${GEN_DIR}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: generated-java-crd-model
+          path: |
+            ${{ env.GEN_DIR }}
